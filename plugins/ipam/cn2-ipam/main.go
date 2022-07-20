@@ -17,6 +17,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 
@@ -258,8 +259,8 @@ func LoadIPAMConfig(bytes []byte, envArgs string) (*IPAMConfig, string, error) {
 func cmdAdd(args *skel.CmdArgs) error {
 
 	routeIP, routeIPCidr, _ := net.ParseCIDR("0.0.0.0/0")
-	_, addressIPCidr, _ := net.ParseCIDR("70.100.0.2/24")
-	gatewayIP, _, _ := net.ParseCIDR("70.100.0.1")
+	_, addressIPCidr, _ := net.ParseCIDR("70.101.1.0/24")
+	gatewayIP, _, _ := net.ParseCIDR("70.101.1.1")
 	confVersion := "0.3.1"
 	ipamConfig := &IPAMConfig{
 		Name: "cn2-ipam",
@@ -269,11 +270,13 @@ func cmdAdd(args *skel.CmdArgs) error {
 			GW:  routeIP,
 		}),
 		Addresses: append([]Address{}, Address{
-			AddressStr: "70.100.0.2/24",
+			AddressStr: "70.101.1.100/24",
 			Address:    *addressIPCidr,
 			Gateway:    gatewayIP,
 		}),
 	}
+
+	log.Printf("======= Ishmeet ======= NW: %s, GW: %s \n", "70.101.1.0/24", "70.101.1.1")
 
 	result := &current.Result{
 		CNIVersion: current.ImplementedSpecVersion,
