@@ -15,10 +15,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
+	"path/filepath"
 	"strings"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -26,6 +29,9 @@ import (
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
 )
 
 // The top-level network config - IPAM plugins are passed the full configuration
@@ -258,10 +264,66 @@ func LoadIPAMConfig(bytes []byte, envArgs string) (*IPAMConfig, string, error) {
 
 func cmdAdd(args *skel.CmdArgs) error {
 
+	var kubeconfig *string
+	if home := homedir.HomeDir(); home != "" {
+		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+	} else {
+		kubeconfig = flag.String("kubeconfig", "/root/.kube/config", "absolute path to the kubeconfig file")
+	}
+	flag.Parse()
+
+	log.Printf("======= Ishmeet kubeconfig: %s homedir.HomeDir(): %s \n", *kubeconfig, homedir.HomeDir())
+
+	// use the current context in kubeconfig
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	if err != nil {
+		log.Printf("======= Ishmeet Panic here 1 %v \n", err)
+		panic(err.Error())
+	}
+
+	// create the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Printf("======= Ishmeet Panic here 2 %v \n", err)
+		panic(err.Error())
+	}
+
+	log.Printf("======= Ishmeet Calling API %s \n", "/apis/core.contrail.juniper.net/v1alpha1/namespaces/telco-profile1/subnets")
+	subnetData := clientset.RESTClient().Get().
+		AbsPath("/apis/core.contrail.juniper.net/v1alpha1/namespaces/telco-profile1/subnets").
+		Do(context.TODO())
+
+	log.Printf("======= Ishmeet Called API \n")
+	var statusCode int
+	subnetData.StatusCode(&statusCode)
+	log.Printf("======= Ishmeet Subnet Status code: %d \n", statusCode)
+	body, _ := subnetData.Raw()
+
+	subnetList := &SubnetList{}
+	err = json.Unmarshal(body, subnetList)
+	if err != nil {
+		log.Printf("======= Ishmeet Unable to unmarshal %v \n", err)
+	}
+	for _, subnet := range subnetList.Items {
+		log.Printf("======= Ishmeet IP CIDR %v \n", subnet.Spec.CIDR)
+		log.Printf("======= Ishmeet IP Gateway %s \n", string(subnet.Spec.DefaultGateway))
+	}
+
+	var addressIPCidr *net.IPNet
+	var gatewayIP net.IP
+	if len(subnetList.Items) > 0 {
+		_, addressIPCidr, _ = net.ParseCIDR(string(subnetList.Items[0].Spec.CIDR))
+		gatewayIP = net.ParseIP(string(subnetList.Items[0].Spec.DefaultGateway))
+	}
+
 	routeIP, routeIPCidr, _ := net.ParseCIDR("0.0.0.0/0")
-	_, addressIPCidr, _ := net.ParseCIDR("70.101.1.0/24")
-	gatewayIP, _, _ := net.ParseCIDR("70.101.1.1")
+	// _, addressIPCidr, _ = net.ParseCIDR("70.101.1.5/32")
+	// gatewayIP = net.ParseIP("70.101.1.1")
 	confVersion := "0.3.1"
+
+	log.Printf("======= Ishmeet ADDRESS_CIDR: %s \n", addressIPCidr)
+	log.Printf("======= Ishmeet DEFAULT_GW: %s \n", gatewayIP)
+
 	ipamConfig := &IPAMConfig{
 		Name: "cn2-ipam",
 		Type: "cn2-ipam",
@@ -270,13 +332,20 @@ func cmdAdd(args *skel.CmdArgs) error {
 			GW:  routeIP,
 		}),
 		Addresses: append([]Address{}, Address{
-			AddressStr: "70.101.1.100/24",
+			AddressStr: "70.101.1.5/32",
 			Address:    *addressIPCidr,
 			Gateway:    gatewayIP,
 		}),
 	}
 
-	log.Printf("======= Ishmeet ======= NW: %s, GW: %s \n", "70.101.1.0/24", "70.101.1.1")
+	log.Printf("======= Ishmeet NW: %s, GW: %s \n", "70.101.1.5/32", "70.101.1.1")
+	log.Printf("======= Ishmeet %v \n", args)
+	log.Printf("======= Ishmeet Container ID: %s \n", string(args.ContainerID))
+	log.Printf("======= Ishmeet Netns: %s \n", string(args.Netns))
+	log.Printf("======= Ishmeet Interface name %s \n", string(args.IfName))
+	log.Printf("======= Ishmeet Args %s \n", string(args.Args))
+	log.Printf("======= Ishmeet Path %s \n", string(args.Path))
+	log.Printf("======= Ishmeet StdinData %v \n", string(args.StdinData))
 
 	result := &current.Result{
 		CNIVersion: current.ImplementedSpecVersion,
