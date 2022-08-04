@@ -161,3 +161,200 @@ type SubnetList struct {
 	// Items contains all of the Subnet instances in the SubnetList.
 	Items []Subnet `json:"items" protobuf:"bytes,2,rep,name=items"`
 }
+
+// IPFamily defines the IP address family type: v4 of v6
+type IPFamily string
+
+// There are IP family types
+const (
+	IPFamilyV4 IPFamily = "v4"
+	IPFamilyV6 IPFamily = "v6"
+)
+
+type ObjectReference struct {
+	// Kind of the referent.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+	// +optional
+	Kind string `json:"kind,omitempty" protobuf:"bytes,1,opt,name=kind"`
+	// Namespace of the referent.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+	// +optional
+	Namespace string `json:"namespace,omitempty" protobuf:"bytes,2,opt,name=namespace"`
+	// Name of the referent.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+	// +optional
+	Name string `json:"name,omitempty" protobuf:"bytes,3,opt,name=name"`
+	// UID of the referent.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids
+	// +optional
+	// UID types.UID `json:"uid,omitempty" protobuf:"bytes,4,opt,name=uid,casttype=k8s.io/apimachinery/pkg/types.UID"`
+	// API version of the referent.
+	// +optional
+	APIVersion string `json:"apiVersion,omitempty" protobuf:"bytes,5,opt,name=apiVersion"`
+	// Specific resourceVersion to which this reference is made, if any.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency
+	// +optional
+	ResourceVersion string `json:"resourceVersion,omitempty" protobuf:"bytes,6,opt,name=resourceVersion"`
+
+	// If referring to a piece of an object instead of an entire object, this string
+	// should contain a valid JSON/Go field access statement, such as desiredState.manifest.containers[2].
+	// For example, if the object reference is to a container within a pod, this would take on a value like:
+	// "spec.containers{name}" (where "name" refers to the name of the container that triggered
+	// the event) or if no container name is specified "spec.containers[2]" (container with
+	// index 2 in this pod). This syntax is chosen only to have some well-defined way of
+	// referencing a part of an object.
+	// TODO: this design is not final and this field is subject to change in the future.
+	// +optional
+	FieldPath string `json:"fieldPath,omitempty" protobuf:"bytes,7,opt,name=fieldPath"`
+}
+
+// ResourceReference is an ObjectReference to a Contrail resource that contains
+// the ContrailFqName of the resource being referenced.
+type ResourceReference struct {
+	ObjectReference `json:",inline" protobuf:"bytes,1,opt,name=objectReference"`
+	ContrailFqName  `json:",inline" protobuf:"bytes,2,opt,name=contrailFqName"`
+}
+
+// InstanceIPSpec defines the desired state of the InstanceIP.
+type InstanceIPSpec struct {
+	// Common spec fields
+	CommonSpec `json:",inline" protobuf:"bytes,1,opt,name=commonSpec"`
+
+	// IP address value for InstanceIP.
+	// +optional
+	IPAddress IPAddress `json:"instanceIPAddress,omitempty" protobuf:"bytes,2,opt,name=instanceIPAddress,casttype=IPAddress"`
+
+	// IP address family for the InstanceIP: "v4" or "v6" for IPv4 or IPv6.
+	// +optional
+	IPFamily IPFamily `json:"instanceIPFamily,omitempty" protobuf:"bytes,3,opt,name=instanceIPFamily,casttype=IPFamily"`
+
+	// Subnet is the CIDR the InstanceIP belongs to.
+	// +optional
+	Subnet CIDR `json:"cidr,omitempty" protobuf:"bytes,4,opt,name=cidr,casttype=CIDR"`
+
+	// VirtualNetworkReference determines the VirtualNetwork the InstanceIP belongs to.
+	// +optional
+	VirtualNetworkReference *ResourceReference `json:"virtualNetworkReference,omitempty" protobuf:"bytes,5,opt,name=virtualNetworkReference"`
+
+	// VirtualMachineInterfaceReferences determines the VirtualMachineInterface
+	// the InstanceIP belongs to.
+	// +optional
+	VirtualMachineInterfaceReferences []ResourceReference `json:"virtualMachineInterfaceReferences,omitempty" protobuf:"bytes,6,rep,name=virtualMachineInterfaceReferences"`
+	// TODO(edouard): should be InstanceIPSpec.VirtualMachineInterfaceReferences limited to one ref ?
+
+	// IPRangeKeys is used to identify the subnet range for IP allocation.
+	// +optional
+	IPRangeKeys []string `json:"ipRangeKeys,omitempty" protobuf:"bytes,7,opt,name=ipRangeKeys"`
+}
+
+// InstanceIPStatus defines the observed state of the InstanceIP.
+type InstanceIPStatus struct {
+	// Common status fields
+	CommonStatus `json:",inline" protobuf:"bytes,1,opt,name=commonStatus"`
+
+	// SubnetReference refers to the Subnet this InstanceIP belongs to.
+	// +optional
+	SubnetReference *ResourceReference `json:"subnetReference,omitempty" protobuf:"bytes,2,opt,name=subnetReference"`
+}
+
+// +kubebuilder:printcolumn:JSONPath=.status.state,description="Contrail resource state",name=State,priority=0,type=string
+// +kubebuilder:printcolumn:JSONPath=.status.observation,description="Contrail resource state observation",name=Observation,priority=1,type=string
+// +kubebuilder:printcolumn:JSONPath=.spec.fqName,description="Contrail FQ name resource",name=FQName,priority=1,type=string
+
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +genclient:nonNamespaced
+
+// InstanceIP represents an IP address and its configuration used for interfaces.
+// +k8s:openapi-gen=true
+// +resource:path=instanceips,strategy=InstanceIPStrategy,shortname=iip,categories=contrail;ipam;networking
+type InstanceIP struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// Standard object's metadata.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+
+	// Specification of the desired state of the InstanceIP.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
+	// +optional
+	Spec InstanceIPSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+
+	// The most recently observed status of the InstanceIP.
+	// This data may not be up-to-date.
+	// Populated by the system.
+	// Read-only.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
+	// +optional
+	Status InstanceIPStatus `json:"status,omitempty" protobuf:"bytes,3,opt,name=status"`
+}
+
+type InstanceIPList struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// Standard list's metadata.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#lists-and-simple-kinds
+	// +optional
+	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+
+	// Items contains all of the InstanceIP instances in the InstanceIPList.
+	Items []InstanceIP `json:"items" protobuf:"bytes,2,rep,name=items"`
+}
+
+// Annotations are used to pass information from kube-manager to Plugin
+type Annotations struct {
+	Cluster          string `json:"cluster"`
+	Kind             string `json:"kind"`
+	Name             string `json:"name"`
+	Namespace        string `json:"namespace"`
+	Network          string `json:"network"`
+	Owner            string `json:"owner"`
+	Project          string `json:"project"`
+	Index            string `json:"index"`
+	Interface        string `json:"interface"`
+	InterfaceType    string `json:"interface-type"`
+	PodUid           string `json:"pod-uid"`
+	PodVhostMode     string `json:"vhost-mode"`
+	VlanId           string `json:"vlan-id"`
+	VmiAddressFamily string `json:"vmi-address-family"`
+}
+
+type Result struct {
+	VmUuid       string   `json:"vm-uuid"`
+	Nw           string   `json:"network-label"`
+	Ip           string   `json:"ip-address"`
+	Plen         int      `json:"plen"`
+	Gw           string   `json:"gateway"`
+	Dns          string   `json:"dns-server"`
+	Mac          string   `json:"mac-address"`
+	VlanId       int      `json:"vlan-id"`
+	SubInterface bool     `json:"sub-interface"`
+	VnId         string   `json:"vn-id"`
+	VnName       string   `json:"vn-name"`
+	VmiUuid      string   `json:"id"`
+	IpV6         string   `json:"v6-ip-address"`
+	DnsV6        string   `json:"v6-dns-server"`
+	GwV6         string   `json:"v6-gateway"`
+	PlenV6       int      `json:"v6-plen"`
+	Args         []string `json:"annotations"`
+	Annotations  Annotations
+}
+
+// Add request to VRouter
+type ContrailAddMsg struct {
+	Time            string `json:"time"`
+	Vm              string `json:"vm-id"`
+	VmUuid          string `json:"vm-uuid"`
+	VmName          string `json:"vm-name"`
+	HostIfName      string `json:"host-ifname"`
+	ContainerIfName string `json:"vm-ifname"`
+	Namespace       string `json:"vm-namespace"`
+	VnId            string `json:"vn-uuid"`
+	VmiUuid         string `json:"vmi-uuid"`
+	VhostMode       int    `json:"vhostuser-mode"`
+	VhostSockDir    string `json:"vhostsocket-dir"`
+	VhostSockName   string `json:"vhostsocket-filename"`
+	VmiType         string `json:"vmi-type"`
+	PodUid          string `json:"pod-uid"`
+}

@@ -15,14 +15,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
@@ -262,6 +266,107 @@ func LoadIPAMConfig(bytes []byte, envArgs string) (*IPAMConfig, string, error) {
 	return n.IPAM, n.CNIVersion, nil
 }
 
+func setHeaders(req *http.Request, key string, value string) *http.Request {
+	req.Header.Set(key, value)
+	return req
+}
+
+//executeHttpMethod - execute the specified httpMethod (POST, PUT)
+func executeHttpMethod(url string, httpMethod string, bodyBytes []byte, authToken string) (*http.Response, error) {
+	body := &bytes.Buffer{}
+	body.WriteString(string(bodyBytes))
+
+	log.Printf("======= Ishmeet Calling %s %s \n", httpMethod, url)
+	request, err := http.NewRequestWithContext(context.Background(), httpMethod, url, body)
+	if err != nil {
+		return nil, err
+	}
+	request = setHeaders(request, "Content-Type", "application/json")
+	if authToken != "" {
+		request = setHeaders(request, "AuthToken", authToken)
+	}
+	client := http.Client{}
+	//nolint: bodyclose
+	resp, err := client.Do(request)
+	if err != nil {
+		log.Printf("Error while executing http request - %v", err)
+		return nil, err
+	}
+	log.Printf("======= Ishmeet Status: %d \n", resp.StatusCode)
+	return resp, nil
+}
+
+//GET - execute GET HTTP request
+func GET(url string, respObj interface{}, authToken string) (*http.Response, error) {
+	resp, err := executeHttpMethod(url, "GET", nil, authToken)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	if respObj == nil {
+		return resp, nil
+	}
+	respBodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Failed to read response body - %v", err)
+		return resp, err
+	}
+
+	log.Printf("======= Ishmeet resp.Body: %v \n", string(respBodyBytes))
+
+	err = json.Unmarshal(respBodyBytes, respObj)
+	if err != nil {
+		log.Printf("Failed to unmarshall response body - %v", err)
+		return resp, err
+	}
+	return resp, nil
+}
+
+func POST(url string, bodyBytes []byte, respObj interface{}, authToken string) (*http.Response, error) {
+	resp, err := executeHttpMethod(url, "POST", bodyBytes, authToken)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	// if respObj == nil {
+	// 	return nil
+	// }
+	// respBodyBytes, err := ioutil.ReadAll(resp.Body)
+	// if err != nil {
+	// 	log.Printf("Failed to read response body - %v", err)
+	// 	return err
+	// }
+	// err = json.Unmarshal(respBodyBytes, respObj)
+	// if err != nil {
+	// 	log.Printf("Failed to unmarshall response body - %v", err)
+	// 	return err
+	// }
+	return resp, nil
+}
+
+func makeMsg(vmName, vmUuid, vmID, containerNamespace,
+	containerIfName, hostIfName, vmiUuid, vnId string,
+	vhostMode string, sockDir string, sockName string, vmiType string, podUid string) []byte {
+	t := time.Now()
+	//Convert vhost-mode string to uint8 0-client, 1-server
+	var mode int = 0
+
+	addMsg := ContrailAddMsg{Time: t.String(), Vm: vmID,
+		VmUuid: vmUuid, VmName: vmName, HostIfName: hostIfName,
+		ContainerIfName: containerIfName, Namespace: containerNamespace,
+		VmiUuid: vmiUuid, VnId: vnId, VhostMode: mode, VhostSockDir: sockDir,
+		VhostSockName: sockName, VmiType: vmiType, PodUid: podUid}
+
+	msg, err := json.MarshalIndent(addMsg, "", "\t")
+	if err != nil {
+		return nil
+	}
+
+	return msg
+}
+
 func cmdAdd(args *skel.CmdArgs) error {
 
 	var kubeconfig *string
@@ -293,7 +398,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		AbsPath("/apis/core.contrail.juniper.net/v1alpha1/namespaces/telco-profile1/subnets").
 		Do(context.TODO())
 
-	log.Printf("======= Ishmeet Called API \n")
+	log.Printf("======= Ishmeet Called subnets API \n")
 	var statusCode int
 	subnetData.StatusCode(&statusCode)
 	log.Printf("======= Ishmeet Subnet Status code: %d \n", statusCode)
@@ -308,6 +413,81 @@ func cmdAdd(args *skel.CmdArgs) error {
 		log.Printf("======= Ishmeet IP CIDR %v \n", subnet.Spec.CIDR)
 		log.Printf("======= Ishmeet IP Gateway %s \n", string(subnet.Spec.DefaultGateway))
 	}
+
+	iipData := clientset.RESTClient().Get().
+		AbsPath("/apis/core.contrail.juniper.net/v1alpha1/instanceips").
+		Do(context.TODO())
+
+	var iipStatusCode int
+	iipData.StatusCode(&iipStatusCode)
+	log.Printf("======= Ishmeet IIP Status code: %d\n", iipStatusCode)
+	body, _ = iipData.Raw()
+
+	iipList := &InstanceIPList{}
+	err = json.Unmarshal(body, iipList)
+	if err != nil {
+		log.Printf("======= Ishmeet Unable to unmarshal %v \n", err)
+	}
+
+	for _, iip := range iipList.Items {
+		log.Printf("======= Ishmeet %s, %s, %s \n", iip.Spec.IPAddress, iip.Spec.IPFamily, iip.ObjectMeta.Name)
+	}
+
+	url := "http://127.0.0.1:9091/vm-cfg/" + "__" + "telco-profile1" + "__" + "sriov-pod-vlan-70"
+	vmCfgResponse := &[]Result{}
+	for i := 0; i < 10; i++ {
+		resp, err := GET(url, vmCfgResponse, "")
+		if err != nil {
+			log.Printf("======= Ishmeet Failed to get vm-cfg - %v", err)
+			break
+		}
+
+		log.Printf("======= Ishmeet vm-cfg response %d. Retry-Count: %d \n", resp.StatusCode, i)
+		if resp.StatusCode == 200 {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	log.Printf("======= Ishmeet vm-cfg: %v", vmCfgResponse)
+
+	for _, vmCfg := range *vmCfgResponse {
+		if strings.Contains(vmCfg.Annotations.Network, "sriov-net-70") {
+			addMsg := makeMsg("__"+"telco-profile1"+"__"+"sriov-pod-vlan-70", vmCfg.VmUuid, args.ContainerID, args.Netns,
+				args.IfName, args.IfName, vmCfg.VmiUuid, vmCfg.VnId, "client", "", "", "", "")
+			log.Printf("======= Ishmeet addMsg %v \n", addMsg)
+
+			resp, err := POST("http://127.0.0.1:9091/vm", addMsg, nil, "")
+			if err != nil {
+				log.Printf("======= Ishmeet Failed to post vm - %v", err)
+			}
+			log.Printf("======= Ishmeet post vm response %d \n", resp.StatusCode)
+		}
+	}
+
+	for _, vmCfg := range *vmCfgResponse {
+		url2 := "http://127.0.0.1:9091/vm/" + vmCfg.VmUuid + "/" + vmCfg.VmiUuid
+		vmResponse := &[]Result{}
+		for i := 0; i < 10; i++ {
+			resp, err := GET(url2, vmResponse, "")
+			if err != nil {
+				log.Printf("======= Ishmeet Failed to get vm - %v", err)
+			}
+
+			log.Printf("======= Ishmeet vm response %d. Retry-Count: %d \n", resp.StatusCode, i)
+			if resp.StatusCode == 200 {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		log.Printf("======= Ishmeet vm: %v", vmResponse)
+	}
+
+	// =================================== DELAY 20secs ===================================
+	for i := 0; i < 10; i++ {
+		log.Printf("======= Ishmeet Sleeping 2 seconds Count %d/10 ...", i+1)
+		time.Sleep(2 * time.Second)
+	}
+	// ====================================================================================
 
 	var addressIPCidr *net.IPNet
 	var gatewayIP net.IP
