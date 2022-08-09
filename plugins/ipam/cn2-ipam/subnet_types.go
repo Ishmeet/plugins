@@ -302,6 +302,19 @@ type InstanceIPList struct {
 	Items []InstanceIP `json:"items" protobuf:"bytes,2,rep,name=items"`
 }
 
+// The top-level network config - IPAM plugins are passed the full configuration
+// of the calling plugin, not just the IPAM section.
+type CN2Net struct {
+	Name       string      `json:"name"`
+	CNIVersion string      `json:"cniVersion"`
+	IPAM       *IPAMConfig `json:"ipam"`
+}
+
+type CN2IPAMConfig struct {
+	Name string
+	Type string `json:"type"`
+}
+
 // Annotations are used to pass information from kube-manager to Plugin
 type Annotations struct {
 	Cluster          string `json:"cluster"`

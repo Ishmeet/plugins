@@ -18,13 +18,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"flag"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
-	"path/filepath"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -33,9 +34,6 @@ import (
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
 )
 
 // The top-level network config - IPAM plugins are passed the full configuration
@@ -77,6 +75,8 @@ type Address struct {
 	Address    net.IPNet
 	Version    string
 }
+
+const FileNotExist = "File/Dir does not exist"
 
 func main() {
 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("static"))
@@ -330,20 +330,121 @@ func POST(url string, bodyBytes []byte, respObj interface{}, authToken string) (
 		return nil, err
 	}
 	defer resp.Body.Close()
-	// if respObj == nil {
-	// 	return nil
-	// }
-	// respBodyBytes, err := ioutil.ReadAll(resp.Body)
-	// if err != nil {
-	// 	log.Printf("Failed to read response body - %v", err)
-	// 	return err
-	// }
-	// err = json.Unmarshal(respBodyBytes, respObj)
-	// if err != nil {
-	// 	log.Printf("Failed to unmarshall response body - %v", err)
-	// 	return err
-	// }
 	return resp, nil
+}
+
+//DELETE - execute DELETE HTTP request
+func DELETE(url string, bodyBytes []byte, respObj interface{}, authToken string) (*http.Response, error) {
+	resp, err := executeHttpMethod(url, "DELETE", bodyBytes, authToken)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	return resp, nil
+}
+
+func getPodInfo(args string) string {
+	re := regexp.MustCompile(
+		"(K8S_POD_NAMESPACE|K8S_POD_NAME)=([a-zA-z0-9-\\.]+)")
+	result := re.FindAllStringSubmatchIndex(args, -1)
+	kv := make(map[string]string)
+	/*
+	 * match[0] --> first char of the regex pattern
+	 * match[1] --> last char of the regex pattern
+	 * match[2] --> first char of the first substring in the regex pattern
+	 * match[3] --> first char of the second substring in the regex pattern
+	 * match[4] --> first char of the third substring in the regex pattern
+	 * match[5] --> last char of the regex pattern
+	 */
+	for _, match := range result {
+		key := args[match[2]:match[3]]
+		value := args[match[4]:match[5]]
+		kv[key] = value
+	}
+	containerName := "" + "__" +
+		kv["K8S_POD_NAMESPACE"] + "__" + kv["K8S_POD_NAME"]
+
+	return containerName
+}
+
+func checkFileOrDirExists(fname string) bool {
+	if _, err := os.Stat(fname); err != nil {
+		log.Printf("File/Dir - %s does not exist. Error - %+v", fname, err)
+		return false
+	}
+
+	log.Printf("File/Dir - %s exists", fname)
+	return true
+}
+
+func makeFileName(VmiUUID string, containerName string) string {
+	fname := filePath + "/" + containerName
+	if VmiUUID != "" {
+		fname = fname + "/" + VmiUUID
+	}
+	return fname
+}
+
+func addVmFile(addMsg []byte, vmiUuid string, containerName string) error {
+	// Check if path to directory exists exists, else create directory
+	path := filePath + "/" + containerName
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := os.MkdirAll(path, 0777); err != nil {
+			log.Printf("Error creating VM directory %s. Error : %s", path, err)
+			return err
+		}
+	}
+
+	// Write file with VMI UUID as the file name
+	fname := makeFileName(vmiUuid, containerName)
+	err := os.WriteFile(fname, addMsg, 0777)
+	if err != nil {
+		log.Printf("Error writing VM config file %s. Error : %s", fname, err)
+		return err
+	}
+
+	return nil
+}
+
+func delVmFile(vmiUuid, containerIfName string) (error, error) {
+	fname := makeFileName(vmiUuid, containerIfName)
+	_, err := os.Stat(fname)
+	// File not present... nothing to do
+	if err != nil {
+		log.Printf("File %s not found. Error : %s", fname, err)
+		return nil, nil
+	}
+
+	err = os.Remove(fname)
+	if err != nil {
+		log.Printf("Failed deleting file %s. Error : %s", fname, err)
+		return nil, nil
+	}
+
+	log.Printf("file %s deleted", fname)
+	return nil, nil
+}
+
+func readContrailAddMsg(fname string) (ContrailAddMsg, error) {
+	var msg ContrailAddMsg
+	if checkFileOrDirExists(fname) {
+		file, err := os.ReadFile(fname)
+		if err != nil {
+			log.Printf("Error reading file %s. Error : %s", fname, err)
+			return msg, fmt.Errorf("Error reading file %s. Error : %+v", fname, err)
+		}
+
+		err = json.Unmarshal(file, &msg)
+		if err != nil {
+			log.Printf("Error decoding file. Error : %+v", err)
+			return msg, err
+		}
+
+		return msg, nil
+	}
+	err := errors.New(FileNotExist)
+	return msg, err
 }
 
 func makeMsg(vmName, vmUuid, vmID, containerNamespace,
@@ -368,72 +469,17 @@ func makeMsg(vmName, vmUuid, vmID, containerNamespace,
 }
 
 func cmdAdd(args *skel.CmdArgs) error {
-
-	var kubeconfig *string
-	if home := homedir.HomeDir(); home != "" {
-		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
-	} else {
-		kubeconfig = flag.String("kubeconfig", "/root/.kube/config", "absolute path to the kubeconfig file")
-	}
-	flag.Parse()
-
-	log.Printf("======= Ishmeet kubeconfig: %s homedir.HomeDir(): %s \n", *kubeconfig, homedir.HomeDir())
-
-	// use the current context in kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		log.Printf("======= Ishmeet Panic here 1 %v \n", err)
-		panic(err.Error())
+	n := CN2Net{}
+	if err := json.Unmarshal(args.StdinData, &n); err != nil {
+		log.Printf("======= Ishmeet Failed to unmarshall StdinData - %v", err)
+		return err
 	}
 
-	// create the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Printf("======= Ishmeet Panic here 2 %v \n", err)
-		panic(err.Error())
-	}
+	containerName := getPodInfo(args.Args)
+	log.Printf("======= Ishmeet containerName: %s \n", containerName)
+	log.Printf("======= Ishmeet CN2Net: %v \n", n)
 
-	log.Printf("======= Ishmeet Calling API %s \n", "/apis/core.contrail.juniper.net/v1alpha1/namespaces/telco-profile1/subnets")
-	subnetData := clientset.RESTClient().Get().
-		AbsPath("/apis/core.contrail.juniper.net/v1alpha1/namespaces/telco-profile1/subnets").
-		Do(context.TODO())
-
-	log.Printf("======= Ishmeet Called subnets API \n")
-	var statusCode int
-	subnetData.StatusCode(&statusCode)
-	log.Printf("======= Ishmeet Subnet Status code: %d \n", statusCode)
-	body, _ := subnetData.Raw()
-
-	subnetList := &SubnetList{}
-	err = json.Unmarshal(body, subnetList)
-	if err != nil {
-		log.Printf("======= Ishmeet Unable to unmarshal %v \n", err)
-	}
-	for _, subnet := range subnetList.Items {
-		log.Printf("======= Ishmeet IP CIDR %v \n", subnet.Spec.CIDR)
-		log.Printf("======= Ishmeet IP Gateway %s \n", string(subnet.Spec.DefaultGateway))
-	}
-
-	iipData := clientset.RESTClient().Get().
-		AbsPath("/apis/core.contrail.juniper.net/v1alpha1/instanceips").
-		Do(context.TODO())
-
-	var iipStatusCode int
-	iipData.StatusCode(&iipStatusCode)
-	log.Printf("======= Ishmeet IIP Status code: %d\n", iipStatusCode)
-	body, _ = iipData.Raw()
-
-	iipList := &InstanceIPList{}
-	err = json.Unmarshal(body, iipList)
-	if err != nil {
-		log.Printf("======= Ishmeet Unable to unmarshal %v \n", err)
-	}
-
-	for _, iip := range iipList.Items {
-		log.Printf("======= Ishmeet %s, %s, %s \n", iip.Spec.IPAddress, iip.Spec.IPFamily, iip.ObjectMeta.Name)
-	}
-
-	url := "http://127.0.0.1:9091/vm-cfg/" + "__" + "telco-profile1" + "__" + "sriov-pod-vlan-70"
+	url := fmt.Sprintf("%s/vm-cfg/%s", vrouterURL, containerName)
 	vmCfgResponse := &[]Result{}
 	for i := 0; i < 10; i++ {
 		resp, err := GET(url, vmCfgResponse, "")
@@ -449,24 +495,44 @@ func cmdAdd(args *skel.CmdArgs) error {
 		time.Sleep(1 * time.Second)
 	}
 	log.Printf("======= Ishmeet vm-cfg: %v", vmCfgResponse)
+	for _, vmcffg := range *vmCfgResponse {
+		log.Printf("======= Ishmeet vm-cfg-Args: %v", vmcffg.Args)
+	}
 
+	isFound := false
+	vmiResult := &Result{}
 	for _, vmCfg := range *vmCfgResponse {
-		if strings.Contains(vmCfg.Annotations.Network, "sriov-net-70") {
-			addMsg := makeMsg("__"+"telco-profile1"+"__"+"sriov-pod-vlan-70", vmCfg.VmUuid, args.ContainerID, args.Netns,
-				args.IfName, args.IfName, vmCfg.VmiUuid, vmCfg.VnId, "client", "", "", "", "")
-			log.Printf("======= Ishmeet addMsg %v \n", addMsg)
+		for _, vmArgs := range vmCfg.Args {
+			if strings.Contains(vmArgs, n.Name) {
+				addMsg := makeMsg(containerName, vmCfg.VmUuid, args.ContainerID, args.Netns,
+					args.IfName, args.IfName, vmCfg.VmiUuid, vmCfg.VnId, "client", "", "", "", "")
+				log.Printf("======= Ishmeet addMsg %v \n", string(addMsg))
 
-			resp, err := POST("http://127.0.0.1:9091/vm", addMsg, nil, "")
-			if err != nil {
-				log.Printf("======= Ishmeet Failed to post vm - %v", err)
+				// Store config to file for persistency
+				if err := addVmFile(addMsg, vmCfg.VmiUuid, containerName); err != nil {
+					log.Printf("======= Ishmeet Error storing config file")
+					return err
+				}
+
+				url := fmt.Sprintf("%s/vm", vrouterURL)
+				resp, err := POST(url, addMsg, nil, "")
+				if err != nil {
+					log.Printf("======= Ishmeet Failed to post vm - %v", err)
+				}
+				log.Printf("======= Ishmeet post vm response %d \n", resp.StatusCode)
+				isFound = true
+				vmiResult = &vmCfg
+				break
 			}
-			log.Printf("======= Ishmeet post vm response %d \n", resp.StatusCode)
+		}
+		if isFound {
+			break
 		}
 	}
 
-	for _, vmCfg := range *vmCfgResponse {
-		url2 := "http://127.0.0.1:9091/vm/" + vmCfg.VmUuid + "/" + vmCfg.VmiUuid
-		vmResponse := &[]Result{}
+	vmResponse := &[]Result{}
+	if isFound {
+		url2 := fmt.Sprintf("%s/vm/"+vmiResult.VmUuid+"/"+vmiResult.VmiUuid, vrouterURL)
 		for i := 0; i < 10; i++ {
 			resp, err := GET(url2, vmResponse, "")
 			if err != nil {
@@ -482,23 +548,20 @@ func cmdAdd(args *skel.CmdArgs) error {
 		log.Printf("======= Ishmeet vm: %v", vmResponse)
 	}
 
-	// =================================== DELAY 20secs ===================================
-	for i := 0; i < 10; i++ {
-		log.Printf("======= Ishmeet Sleeping 2 seconds Count %d/10 ...", i+1)
-		time.Sleep(2 * time.Second)
-	}
-	// ====================================================================================
-
 	var addressIPCidr *net.IPNet
 	var gatewayIP net.IP
-	if len(subnetList.Items) > 0 {
-		_, addressIPCidr, _ = net.ParseCIDR(string(subnetList.Items[0].Spec.CIDR))
-		gatewayIP = net.ParseIP(string(subnetList.Items[0].Spec.DefaultGateway))
+	if isFound {
+		for _, vm := range *vmResponse {
+			mask := net.CIDRMask(vm.Plen, 32)
+			addressIPCidr = &net.IPNet{IP: net.ParseIP(vm.Ip), Mask: mask}
+			gatewayIP = net.ParseIP(vm.Gw)
+		}
+	} else {
+		_, addressIPCidr, _ = net.ParseCIDR(string("1.1.1.2/32"))
+		gatewayIP = net.ParseIP(string("1.1.1.1"))
 	}
 
 	routeIP, routeIPCidr, _ := net.ParseCIDR("0.0.0.0/0")
-	// _, addressIPCidr, _ = net.ParseCIDR("70.101.1.5/32")
-	// gatewayIP = net.ParseIP("70.101.1.1")
 	confVersion := "0.3.1"
 
 	log.Printf("======= Ishmeet ADDRESS_CIDR: %s \n", addressIPCidr)
@@ -543,6 +606,61 @@ func cmdAdd(args *skel.CmdArgs) error {
 }
 
 func cmdDel(args *skel.CmdArgs) error {
-	// Nothing required because of no resource allocation in static plugin.
+	n := CN2Net{}
+	if err := json.Unmarshal(args.StdinData, &n); err != nil {
+		log.Printf("======= Ishmeet Failed to unmarshall StdinData - %v", err)
+		return err
+	}
+
+	containerName := getPodInfo(args.Args)
+	log.Printf("======= Ishmeet DeletePath containerName: %s \n", containerName)
+	log.Printf("======= Ishmeet DeletePath CN2Net: %v \n", n)
+
+	dir, err := os.ReadDir(filePath + "/" + containerName)
+	if err != nil {
+		return fmt.Errorf("unable to find path %s, Err: %s", filePath, err)
+	}
+
+	isFound := false
+	for _, file := range dir {
+		log.Printf("fileName: %s", file.Name())
+		contrailMsg, err := readContrailAddMsg(filePath + "/" + containerName + "/" + file.Name())
+		if err != nil {
+			return fmt.Errorf("unable to read file %s, Err: %s", file.Name(), err)
+		}
+
+		log.Printf("======= Ishmeet DeletePath %s,%s\n", contrailMsg.ContainerIfName, args.IfName)
+		if contrailMsg.ContainerIfName == args.IfName {
+			log.Printf("======= Ishmeet DeletePath Interface %s found\n", args.IfName)
+			isFound = true
+
+			_, _ = delVmFile(file.Name(), containerName)
+
+			delMsg := makeMsg("", contrailMsg.VmUuid, contrailMsg.Vm, "", "", "", "", "", "", "", "", "", "")
+			url := fmt.Sprintf("%s/vm/%s", vrouterURL, contrailMsg.VmUuid)
+			resp, err := DELETE(url, delMsg, nil, "")
+			if err != nil {
+				log.Printf("======= Ishmeet Failed to delete vm - %v", err)
+			}
+			log.Printf("======= Ishmeet delete vm response %d \n", resp.StatusCode)
+		}
+	}
+	if !isFound {
+		log.Printf("======= Ishmeet DeletePath interface %s not found", args.IfName)
+		return fmt.Errorf("interface %s not found", args.IfName)
+	}
+
 	return nil
+}
+
+var filePath = "/var/lib/contrail/ports/vm"
+
+func setFilePath(path string) {
+	filePath = path
+}
+
+var vrouterURL = "http://127.0.0.1:9091"
+
+func setVRouterURL(url string) {
+	vrouterURL = url
 }
